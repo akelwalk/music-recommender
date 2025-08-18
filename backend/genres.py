@@ -1,0 +1,3 @@
+GENRES = [
+    "Afrobeat"
+]

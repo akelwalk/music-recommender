@@ -1,9 +1,13 @@
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
-import os
+from spotipy.exceptions import SpotifyException
 from dotenv import load_dotenv
+import pymongo
+from pymongo import MongoClient
+import os
 import random
 import requests
+import time
 
 
 load_dotenv()  # load variables from .env
@@ -27,9 +31,7 @@ NUM_SONGS_PER_PLAYLIST = 5  # we are currently only getting 1 playlist per genre
 # need error code 429 (rate limit exceeded handling)
 def get_playlists_per_genre():
     for genre in GENRES:
-        result = sp.search(
-            q=genre, limit=10, offset=0, type="playlist"
-        )  # default limit returns 10
+        result = spotify_retry_request(sp.search, q=genre, limit=10, offset=0, type="playlist") #in case of rate limiting
         playlists = result["playlists"]["items"]  # getting the playlists
         chosen_pl = choose_playlist(playlists)  # randomly choose one playlist
         tracks = get_playlist_tracks(chosen_pl["id"])  # get tracks for that playlist
@@ -51,15 +53,12 @@ def choose_playlist(playlists):
     return chosen
 
 
-# gets first 100 tracks for a specific playlist id
-# for each track, items and then track are the useful fields ->
+# gets n tracks for a specific playlist id
 def get_playlist_tracks(playlist_id):
-    tracks = sp.playlist_items(
-        playlist_id, additional_types=["track"], limit=NUM_SONGS_PER_PLAYLIST
-    )
+    tracks = spotify_retry_request(sp.playlist_items, playlist_id=playlist_id, additional_types=["track"], limit=NUM_SONGS_PER_PLAYLIST)
     return tracks["items"]
 
-
+# gets ids of tracks
 def get_track_ids(tracks):
     ids = []
     for track in tracks:
@@ -69,7 +68,7 @@ def get_track_ids(tracks):
             print(f"This track doesn't have an id: {track}")
     return ids
 
-
+# calls recco beat's api to get audio features
 def get_audio_features(tracks):
     track_ids = get_track_ids(tracks)
     features = []
@@ -78,10 +77,34 @@ def get_audio_features(tracks):
     for id in track_ids:
         if id:
             params = {"ids": id}
-            response = requests.request("GET", url, headers=headers, params=params)
+            response = recco_retry_request(url=url, headers=headers, params=params) #in case of rate limiting
             features.append(response.json()["content"])
     return features
 
+# wrapper to handle spotify rate limiting; can accept any function
+def spotify_retry_request(func, *args, **kwargs):
+    while True:
+        try:
+            return func(*args, **kwargs)
+        except SpotifyException as e:
+            if e.http_status == 429:
+                retry_after = int(e.headers.get('Retry-After', 5))  # default to 5 sec if retry-after header is missing
+                print(f"Rate limited by Spotify. Waiting {retry_after} seconds...")
+                time.sleep(retry_after)
+            else:
+                raise e
+
+# wrapper to handle reccobeats rate limiting
+def recco_retry_request(url, headers, params):
+    while True:
+        response = requests.request("GET", url=url, headers=headers, params=params)
+        if response.status_code == 429:
+            retry_after = int(response.headers.get('Retry-After', 5))
+            print(f"Rate limited by Reccobeats. Waiting {retry_after} seconds...")
+            time.sleep(retry_after)
+        else:
+            response.raise_for_status() # raise an error if present
+            return response
 
 # calling first function
 get_playlists_per_genre()

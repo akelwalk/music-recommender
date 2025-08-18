@@ -57,6 +57,7 @@ spotify_credentials.json
 config.json
 .env.local
 .env.*.local
+.cache
 
 # -----------------------------
 # OS Files

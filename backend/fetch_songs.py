@@ -37,32 +37,28 @@ db = client["musicdb"]
 tracks_collection = db["tracks"]
 
 # const variables
-NUM_SONGS_REQUESTED_PER_PLAYLIST = 100  # we are currently only getting 1 playlist per genre, and this many songs per playlist (max # of songs: 100)
-VALID_SONGS = 50
+NUM_SONGS_REQUESTED_PER_PLAYLIST = 3  # we are currently only getting 1 playlist per genre, and this many songs per playlist (max # of songs: 100)
+VALID_SONGS = 5
 # global variables
 db_count = 0
 
 
 # track the counts
-def get_playlists_per_genre():
+def fetch_tracks_per_genre():
     global db_count
     for genre in genres.GENRES:
-        db_count = 0  # TODO: need to make a function to get the current count of the genre already in the database - count function with optional filter argumensts
-        result = spotify_retry_request(
-            sp.search, q=genre, limit=10, offset=0, type="playlist"
-        )  # in case of rate limiting
-        playlists = result["playlists"]["items"]  # getting the playlists
-        playlists = remove_nones(playlists)  # remove none values
-        prev_ids = (
-            ""  # keeps track of playlists we've already tried to extract songs from
-        )
-        retry_count = len(playlists)
         track_map = {}
+        db_count = get_docs_from_mongo(track_map, genre)
+        if db_count >= VALID_SONGS:
+            print(f"Already have {db_count} {genre} songs in database")
+            continue
+        
+        playlists = get_playlists(genre)
+        prev_ids = set()  # keeps track of playlists we've already tried to extract songs from
+        retry_count = len(playlists)
 
         while len(track_map) < (VALID_SONGS - db_count) and retry_count > 0:
-            chosen_pl = choose_playlist(
-                playlists, prev_ids
-            )  # randomly choose one playlist
+            chosen_pl = choose_playlist(playlists, prev_ids)  # randomly choose one playlist
             playlist_id = chosen_pl["id"]
             tracks = get_playlist_tracks(playlist_id)  # get tracks for that playlist
             audio_features = get_audio_features(tracks)
@@ -71,7 +67,7 @@ def get_playlists_per_genre():
             )  # modifies the track_map
 
             retry_count -= 1
-            prev_ids += playlist_id + " "
+            prev_ids.add(playlist_id)
 
         # store to mongodb
         count = store_tracks_in_mongo(track_map, genre)
@@ -79,27 +75,30 @@ def get_playlists_per_genre():
             "##################################################################################################################################################################"
         )
         print(
-            f"Retried {len(playlists-retry_count)} times out of {len(playlists)} possible retries"
+            f"Retried {len(playlists) - retry_count} times out of {len(playlists)} possible retries"
         )
-        print(f"Number of tracks stored for {genre}: {count}")
+        print(f"Number of new tracks stored for {genre}: {count}")
+        print(f"Number of {genre} already in database: {db_count}")
 
 
 def remove_nones(list):
-    new_list = []
-    for l in list:
-        if l:
-            new_list.append(l)
-    return new_list
+    return [p for p in list if p]
 
 
-# TODO:test this
+def get_playlists(genre):
+    result = spotify_retry_request(
+        sp.search, q=genre, limit=10, offset=0, type="playlist"
+    )  # in case of rate limiting
+    playlists = result["playlists"]["items"]  # getting the playlists
+    playlists = remove_nones(playlists)  # remove none values
+    return playlists
+
+
 # randomly chooses a single playlist given a list of playlists
 def choose_playlist(playlists, prev_ids):
     index = random.randint(0, len(playlists) - 1)
     chosen = playlists[index]
-    while (
-        chosen["id"] in prev_ids
-    ):  # makes sure chosen playlist is different from previous ones
+    while (chosen["id"] in prev_ids):  # makes sure chosen playlist is different from previous ones
         index = random.randint(0, len(playlists) - 1)
         chosen = playlists[index]
     return chosen
@@ -165,6 +164,9 @@ def store_tracks_in_mongo(track_map, genre):
         features = data[1]
         playlist_id = data[2]
 
+        if track == "": #skipping empty entries - these empty entries come from reading from the database
+            continue
+
         doc = {
             "_id": t_id,  # track id is the main ID
             "metadata": {
@@ -181,16 +183,22 @@ def store_tracks_in_mongo(track_map, genre):
         }
 
         result = tracks_collection.update_one(
-            {"_id": t_id}, {"$set": doc}, upsert=True
-        )  # upsert: insert if not exists, update if exists
+            {"_id": t_id}, {"$setOnInsert": doc}, upsert=True
+        )  # set on insert: insert if _id doesn't exist, otherwise skip
 
-        if (
-            result.matched_count == 0 and result.upserted_id is not None
-        ):  # inserted a brand new track - no previous ids matched and an upsert is a new insert
+        if (result.upserted_id is not None):  # inserted a brand new track - no previous ids matched and an upsert is a new insert
             count += 1
 
     return count
 
+
+def get_docs_from_mongo(track_map, genre):
+    cursor = tracks_collection.find({"genre": genre})
+    count = tracks_collection.count_documents({"genre": genre})
+    
+    for doc in cursor:
+        track_map[doc["_id"]] = ["", "", ""] #info stored is irrelevant because we're gonna skip over these tracks, they're already in the database
+    return count
 
 # wrapper to handle spotify rate limiting; can accept any function
 def spotify_retry_request(func, *args, **kwargs):
@@ -222,5 +230,5 @@ def recco_retry_request(url, headers, params):
 
 
 # calling first function
-get_playlists_per_genre()
+fetch_tracks_per_genre()
 client.close()  # close mongodb connection

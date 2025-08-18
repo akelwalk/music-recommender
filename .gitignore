@@ -1,0 +1,65 @@
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+*.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+pip-log.txt
+pip-delete-this-directory.txt
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# -----------------------------
+# VSCode
+# -----------------------------
+.vscode/
+*.code-workspace
+
+# -----------------------------
+# Node / React
+# -----------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+.pnp.*
+.cache/
+dist/
+build/
+
+# -----------------------------
+# MongoDB / Database
+# -----------------------------
+*.log
+*.bak
+*.tmp
+*.swp
+dump/
+data/
+*.lock
+
+# -----------------------------
+# Spotify API / Secrets
+# -----------------------------
+spotify_credentials.json
+config.json
+.env.local
+.env.*.local
+
+# -----------------------------
+# OS Files
+# -----------------------------
+.DS_Store
+Thumbs.db

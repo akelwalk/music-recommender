@@ -9,6 +9,7 @@ import random
 import requests
 import time
 import genres
+from collections import defaultdict
 
 
 load_dotenv()  # load variables from .env
@@ -37,39 +38,51 @@ tracks_collection = db["tracks"]
 
 # const variables
 NUM_SONGS_REQUESTED_PER_PLAYLIST = 100  # we are currently only getting 1 playlist per genre, and this many songs per playlist (max # of songs: 100)
-VALID_SONGS = 50 
-# global variable
-count = 0
+VALID_SONGS = 50
+# global variables
+db_count = 0
 
-#track the counts
+
+# track the counts
 def get_playlists_per_genre():
-    global count
+    global db_count
     for genre in genres.GENRES:
-        count = 0 #TODO: need to make a function to get the current count of the genre already in the database - count function with optional filter argumensts
+        db_count = 0  # TODO: need to make a function to get the current count of the genre already in the database - count function with optional filter argumensts
         result = spotify_retry_request(
             sp.search, q=genre, limit=10, offset=0, type="playlist"
         )  # in case of rate limiting
         playlists = result["playlists"]["items"]  # getting the playlists
-        playlists = remove_nones(playlists) #remove none values
-        prev_ids = "" # keeps track of playlists we've already tried to extract songs from
+        playlists = remove_nones(playlists)  # remove none values
+        prev_ids = (
+            ""  # keeps track of playlists we've already tried to extract songs from
+        )
         retry_count = len(playlists)
+        track_map = {}
 
-        while count < VALID_SONGS and retry_count > 0:
-            chosen_pl = choose_playlist(playlists, prev_ids)  # randomly choose one playlist
+        while len(track_map) < (VALID_SONGS - db_count) and retry_count > 0:
+            chosen_pl = choose_playlist(
+                playlists, prev_ids
+            )  # randomly choose one playlist
             playlist_id = chosen_pl["id"]
             tracks = get_playlist_tracks(playlist_id)  # get tracks for that playlist
             audio_features = get_audio_features(tracks)
-            # using playlist id and genre name, function to write the data or sumn to mongodb
-            count = store_tracks_in_mongo(tracks, audio_features, genre, playlist_id)
+            create_track_map(
+                track_map, tracks, audio_features, playlist_id
+            )  # modifies the track_map
 
             retry_count -= 1
             prev_ids += playlist_id + " "
-        
+
+        # store to mongodb
+        count = store_tracks_in_mongo(track_map, genre)
         print(
             "##################################################################################################################################################################"
         )
-        print(f"Retried {len(playlists-retry_count)} times out of {len(playlists)} possible retries")
+        print(
+            f"Retried {len(playlists-retry_count)} times out of {len(playlists)} possible retries"
+        )
         print(f"Number of tracks stored for {genre}: {count}")
+
 
 def remove_nones(list):
     new_list = []
@@ -78,11 +91,15 @@ def remove_nones(list):
             new_list.append(l)
     return new_list
 
+
+# TODO:test this
 # randomly chooses a single playlist given a list of playlists
 def choose_playlist(playlists, prev_ids):
     index = random.randint(0, len(playlists) - 1)
     chosen = playlists[index]
-    while chosen["id"] in prev_ids: # makes sure chosen playlist is different from previous ones
+    while (
+        chosen["id"] in prev_ids
+    ):  # makes sure chosen playlist is different from previous ones
         index = random.randint(0, len(playlists) - 1)
         chosen = playlists[index]
     return chosen
@@ -126,6 +143,55 @@ def get_audio_features(tracks):
     return features
 
 
+def create_track_map(track_map, tracks, audio_features, playlist_id):
+    global db_count
+    for track, features in zip(tracks, audio_features):
+        if not track or not track.get("track") or not features:
+            continue
+        if len(track_map) >= (
+            VALID_SONGS - db_count
+        ):  # once we have reached the valid songs to add we can break out of this function, we don't need to add anything else to track_map
+            break
+
+        t_id = track["track"]["id"]
+        if t_id not in track_map:
+            track_map[t_id] = [track["track"], features, playlist_id]
+
+
+def store_tracks_in_mongo(track_map, genre):
+    count = 0
+    for t_id, data in track_map.items():  # this only contains valid tracks and features
+        track = data[0]  # this is already track["track"]
+        features = data[1]
+        playlist_id = data[2]
+
+        doc = {
+            "_id": t_id,  # track id is the main ID
+            "metadata": {
+                "name": track["name"],
+                "artists": [artist["name"] for artist in track["artists"]],
+                "album": track["album"]["name"],
+                "images": track["album"].get("images", []),
+                "track_link": track["external_urls"]["spotify"],
+            },
+            "audio_features": features[0],
+            "playlist_id": playlist_id,
+            "genre": genre,
+            "emb": {"triplet64": None, "ae32": None},  # leaving blank for now
+        }
+
+        result = tracks_collection.update_one(
+            {"_id": t_id}, {"$set": doc}, upsert=True
+        )  # upsert: insert if not exists, update if exists
+
+        if (
+            result.matched_count == 0 and result.upserted_id is not None
+        ):  # inserted a brand new track - no previous ids matched and an upsert is a new insert
+            count += 1
+
+    return count
+
+
 # wrapper to handle spotify rate limiting; can accept any function
 def spotify_retry_request(func, *args, **kwargs):
     while True:
@@ -153,38 +219,6 @@ def recco_retry_request(url, headers, params):
         else:
             response.raise_for_status()  # raise an error if present
             return response
-
-
-def store_tracks_in_mongo(tracks, audio_features, genre, playlist_id):
-    global count
-    for track, features in zip(tracks, audio_features):
-        if count == VALID_SONGS:
-            break
-        if not track or not track.get("track") or not features:
-            continue
-        t = track["track"]
-        doc = {
-            "_id": t["id"],  # track id is the main ID
-            "metadata": {
-                "name": t["name"],
-                "artists": [artist["name"] for artist in t["artists"]],
-                "album": t["album"]["name"],
-                "images": t["album"].get("images", []),
-                "track_link": t["external_urls"]["spotify"]
-            },
-            "audio_features": features[0],
-            "playlist_id": playlist_id,
-            "genre": genre,
-            "emb": {"triplet64": None, "ae32": None},  # leaving blank for now
-        }
-
-        result = tracks_collection.update_one(
-            {"_id": t["id"]}, {"$set": doc}, upsert=True
-        )  # upsert: insert if not exists, update if exists
-
-        if result.matched_count == 0 and result.upserted_id is not None: #inserted a brand new track - no previous ids matched and an upsert is a new insert
-            count += 1
-    return count
 
 
 # calling first function

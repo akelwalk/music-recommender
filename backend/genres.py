@@ -1,3 +1,1 @@
-GENRES = [
-    "Afrobeat"
-]
+GENRES = ["Afrobeat"]
